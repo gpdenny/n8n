@@ -165,4 +165,383 @@ describe('AwsSecretsManager', () => {
 		expect(awsSecretsManager.getSecret('secret2')).toBe('secret2-value');
 		expect(awsSecretsManager.getSecret('secret3')).toBe('secret3-value');
 	});
+
+	describe('Filter functionality', () => {
+		it('should apply valid tag-key filter', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson: '[{"Key": "tag-key", "Values": ["Environment"]}]',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'filtered-secret1' }, { Name: 'filtered-secret2' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [
+						{ Name: 'filtered-secret1', SecretString: 'filtered-value1' },
+						{ Name: 'filtered-secret2', SecretString: 'filtered-value2' },
+					],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: [{ Key: 'tag-key', Values: ['Environment'] }],
+			});
+
+			expect(awsSecretsManager.getSecret('filtered-secret1')).toBe('filtered-value1');
+			expect(awsSecretsManager.getSecret('filtered-secret2')).toBe('filtered-value2');
+		});
+
+		it('should apply valid tag-value filter', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson: '[{"Key": "tag-value", "Values": ["Production", "Staging"]}]',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'prod-secret' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [{ Name: 'prod-secret', SecretString: 'prod-value' }],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: [{ Key: 'tag-value', Values: ['Production', 'Staging'] }],
+			});
+
+			expect(awsSecretsManager.getSecret('prod-secret')).toBe('prod-value');
+		});
+
+		it('should apply multiple filters', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson:
+					'[{"Key": "tag-key", "Values": ["Environment"]}, {"Key": "name", "Values": ["db-*"]}]',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'db-secret' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [{ Name: 'db-secret', SecretString: 'db-value' }],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: [
+					{ Key: 'tag-key', Values: ['Environment'] },
+					{ Key: 'name', Values: ['db-*'] },
+				],
+			});
+
+			expect(awsSecretsManager.getSecret('db-secret')).toBe('db-value');
+		});
+
+		it('should handle empty filter JSON', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson: '',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'all-secret' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [{ Name: 'all-secret', SecretString: 'all-value' }],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: undefined,
+			});
+
+			expect(awsSecretsManager.getSecret('all-secret')).toBe('all-value');
+		});
+
+		it('should handle empty array filter JSON', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson: '[]',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'no-filter-secret' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [{ Name: 'no-filter-secret', SecretString: 'no-filter-value' }],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: undefined,
+			});
+
+			expect(awsSecretsManager.getSecret('no-filter-secret')).toBe('no-filter-value');
+		});
+
+		it('should handle invalid JSON gracefully', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson: 'invalid json',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'fallback-secret' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [{ Name: 'fallback-secret', SecretString: 'fallback-value' }],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			// Should fall back to no filters when JSON is invalid
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: undefined,
+			});
+
+			expect(awsSecretsManager.getSecret('fallback-secret')).toBe('fallback-value');
+		});
+
+		it('should handle non-array JSON gracefully', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson: '{"not": "an array"}',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'fallback-secret2' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [{ Name: 'fallback-secret2', SecretString: 'fallback-value2' }],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			// Should fall back to no filters when JSON is not an array
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: undefined,
+			});
+
+			expect(awsSecretsManager.getSecret('fallback-secret2')).toBe('fallback-value2');
+		});
+
+		it('should handle invalid filter structure gracefully', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson: '[{"invalid": "structure"}]',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'fallback-secret3' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [{ Name: 'fallback-secret3', SecretString: 'fallback-value3' }],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			// Should fall back to no filters when filter structure is invalid
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: undefined,
+			});
+
+			expect(awsSecretsManager.getSecret('fallback-secret3')).toBe('fallback-value3');
+		});
+
+		it('should handle unsupported filter keys gracefully', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson: '[{"Key": "unsupported-key", "Values": ["value"]}]',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'fallback-secret4' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [{ Name: 'fallback-secret4', SecretString: 'fallback-value4' }],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			// Should fall back to no filters when filter key is unsupported
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: undefined,
+			});
+
+			expect(awsSecretsManager.getSecret('fallback-secret4')).toBe('fallback-value4');
+		});
+
+		it('should handle mixed valid and invalid filters gracefully', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson: '[{"Key": "tag-key", "Values": ["Environment"]}, {"invalid": "filter"}]',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'fallback-secret5' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [{ Name: 'fallback-secret5', SecretString: 'fallback-value5' }],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			// Should fall back to no filters when any filter is invalid
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: undefined,
+			});
+
+			expect(awsSecretsManager.getSecret('fallback-secret5')).toBe('fallback-value5');
+		});
+
+		it('should handle filters with non-string values gracefully', async () => {
+			context.settings = {
+				region,
+				authMethod: 'iamUser',
+				accessKeyId,
+				secretAccessKey,
+				filterJson: '[{"Key": "tag-key", "Values": ["Environment", 123]}]',
+			};
+
+			await awsSecretsManager.init(context);
+
+			listSecretsSpy.mockImplementation(async () => {
+				return {
+					SecretList: [{ Name: 'fallback-secret6' }],
+				};
+			});
+
+			batchGetSpy.mockImplementation(async () => {
+				return {
+					SecretValues: [{ Name: 'fallback-secret6', SecretString: 'fallback-value6' }],
+				};
+			});
+
+			await awsSecretsManager.update();
+
+			// Should fall back to no filters when values are not all strings
+			expect(listSecretsSpy).toHaveBeenCalledWith({
+				NextToken: undefined,
+				Filters: undefined,
+			});
+
+			expect(awsSecretsManager.getSecret('fallback-secret6')).toBe('fallback-value6');
+		});
+	});
 });

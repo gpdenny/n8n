@@ -1,4 +1,9 @@
-import { SecretsManager, type SecretsManagerClientConfig } from '@aws-sdk/client-secrets-manager';
+import {
+	SecretsManager,
+	type SecretsManagerClientConfig,
+	type Filter,
+	type FilterNameStringType,
+} from '@aws-sdk/client-secrets-manager';
 import { Logger } from '@n8n/backend-common';
 import { Container } from '@n8n/di';
 import type { INodeProperties } from 'n8n-workflow';
@@ -12,9 +17,18 @@ type Secret = {
 	secretValue: string;
 };
 
+const allowedKeys: Set<FilterNameStringType> = new Set([
+	'description',
+	'name',
+	'tag-key',
+	'tag-value',
+	'all',
+]);
+
 export type AwsSecretsManagerContext = SecretsProviderSettings<
 	{
 		region: string;
+		filterJson: string;
 	} & (
 		| {
 				authMethod: 'iamUser';
@@ -94,11 +108,24 @@ export class AwsSecretsManager implements SecretsProvider {
 				},
 			},
 		},
+		{
+			displayName: 'Secret Filters (JSON)',
+			name: 'filterJson',
+			type: 'string',
+			default: '',
+			noDataExpression: true,
+			description:
+				'JSON array of filters with "Key" (e.g. "tag-key", "tag-value") and "Values" (array of strings). Only filters with keys <a href="https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/Package/-aws-sdk-client-secrets-manager/Interface/Filter/">supported by AWS Secrets Manager</a> are applied. Leave empty to fetch all secrets.',
+			placeholder:
+				'[{"Key": "tag-key","Values": ["SecretUser"] },{"Key":"tag-value","Values":["N8N"]}]',
+		},
 	];
 
 	private cachedSecrets: Record<string, string> = {};
 
 	private client: SecretsManager;
+
+	private clientFilters: Filter[] | undefined;
 
 	constructor(private readonly logger = Container.get(Logger)) {
 		this.logger = this.logger.scoped('external-secrets');
@@ -115,6 +142,7 @@ export class AwsSecretsManager implements SecretsProvider {
 			clientConfig.credentials = { accessKeyId, secretAccessKey };
 		}
 
+		this.clientFilters = this.parseFiltersFromJson(context.settings.filterJson);
 		this.client = new SecretsManager(clientConfig);
 
 		this.logger.debug('AWS Secrets Manager provider initialized');
@@ -122,7 +150,7 @@ export class AwsSecretsManager implements SecretsProvider {
 
 	async test(): Promise<[boolean] | [boolean, string]> {
 		try {
-			await this.client.listSecrets({ MaxResults: 1 });
+			await this.client.listSecrets({ MaxResults: 1, Filters: this.clientFilters });
 			return [true];
 		} catch (e) {
 			const error = e instanceof Error ? e : new Error(`${e}`);
@@ -170,6 +198,58 @@ export class AwsSecretsManager implements SecretsProvider {
 		return Object.keys(this.cachedSecrets);
 	}
 
+	private parseFiltersFromJson(json: string): Filter[] | undefined {
+		let parsed: unknown;
+
+		if (json === '') {
+			return undefined;
+		}
+
+		try {
+			parsed = JSON.parse(json);
+		} catch (error) {
+			this.logger.warn(
+				'Invalid JSON filter for AWS Secrets Manager provider, will fetch all secrets',
+			);
+			return undefined;
+		}
+
+		if (!Array.isArray(parsed)) {
+			this.logger.warn(
+				'Parsed value is not an array for AWS Secrets Manager provider, will fetch all secrets',
+			);
+			return undefined;
+		}
+
+		if (parsed.length === 0) {
+			return undefined;
+		}
+
+		const filters = parsed.every((item) => this.isValidFilter(item)) ? parsed : undefined;
+
+		if (!filters) {
+			this.logger.warn('Parsed filters contain invalid items, will fetch all secrets');
+			return undefined;
+		}
+
+		return filters;
+	}
+
+	private isValidFilter(item: unknown): item is Filter {
+		if (typeof item !== 'object' || item === null) return false;
+
+		const obj = item as Record<string, unknown>;
+		const Key = obj.Key;
+		const Values = obj.Values;
+
+		return (
+			typeof Key === 'string' &&
+			allowedKeys.has(Key as FilterNameStringType) &&
+			Array.isArray(Values) &&
+			Values.every((val) => typeof val === 'string')
+		);
+	}
+
 	private assertAuthType(context: AwsSecretsManagerContext) {
 		const { authMethod } = context.settings;
 		if (authMethod === 'iamUser' || authMethod === 'autoDetect') return;
@@ -183,6 +263,7 @@ export class AwsSecretsManager implements SecretsProvider {
 		do {
 			const response = await this.client.listSecrets({
 				NextToken: nextToken,
+				Filters: this.clientFilters,
 			});
 
 			if (response.SecretList) {
